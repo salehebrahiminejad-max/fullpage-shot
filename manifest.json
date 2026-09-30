@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Full Page Shot",
-  "version": "1.1.0",
-  "description": "Capture the entire page as a single PNG, with one click or Alt+Shift+S.",
+  "version": "1.2.0",
+  "description": "Capture the entire page as one PNG — copy it to the clipboard or save it, with a single click.",
   "minimum_chrome_version": "116",
   "icons": {
     "16": "icons/icon16.png",
@@ -13,13 +13,16 @@
   "permissions": [
     "debugger",
     "downloads",
+    "scripting",
+    "activeTab",
+    "clipboardWrite",
     "tabs"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Full-page screenshot  (Alt+Shift+S)",
+    "default_title": "Copy the full page as an image  (Alt+Shift+S)",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -32,7 +35,13 @@
       "suggested_key": {
         "default": "Alt+Shift+S"
       },
-      "description": "Capture the full page"
+      "description": "Capture the full page and copy it to the clipboard"
+    },
+    "save": {
+      "suggested_key": {
+        "default": "Alt+Shift+D"
+      },
+      "description": "Capture the full page and save it to Downloads"
     }
   }
 }

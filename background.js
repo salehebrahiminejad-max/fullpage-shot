@@ -8,10 +8,12 @@
  * and it works on a background tab without stealing focus. The debugger detaches
  * immediately, so Chrome's "started debugging this browser" bar goes away.
  *
- * The PNG travels to disk as a `data:` URL. That avoids the blob-URL route
- * entirely: a service worker cannot create object URLs, and Chrome discards the
- * `filename` hint when a download's URL is a blob (the file lands as the blob's
- * bare UUID). A data: URL carries no filename of its own, so the hint is used.
+ * Two destinations:
+ *   - clipboard (default) — paste straight into a chat, doc, or editor
+ *   - a PNG in Downloads
+ * The clipboard write runs in the page, which is the only context that can build
+ * a ClipboardItem. It needs the page to be focused and a secure context, so a
+ * failure falls back to saving the file rather than doing nothing.
  */
 
 let busy = false;
@@ -62,12 +64,6 @@ function detach(tabId) {
 
 // ------------------------------------------------------------------- utilities
 
-/**
- * Build a filename Chrome will accept verbatim. Page titles routinely contain
- * characters that survive sanitising but still make `downloads.download` fall
- * back to its own default name, so the name is derived from the URL host and a
- * timestamp instead — always plain ASCII.
- */
 function hostOf(url) {
   try {
     return new URL(url).hostname.replace(/^www\./, '') || 'page';
@@ -113,6 +109,41 @@ async function capture(tab) {
   }
 }
 
+/**
+ * Write the PNG to the system clipboard from inside the page.
+ *
+ * `func` is serialised and runs in the page, so it cannot close over anything —
+ * every value it needs arrives through `args`. Returns false instead of throwing
+ * when the context cannot accept a clipboard write (http page, unfocused
+ * window, denied permission), which lets the caller fall back to a file.
+ */
+async function copyToClipboard(tabId, base64) {
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      args: [base64],
+      func: async (b64) => {
+        try {
+          const binary = atob(b64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+          const blob = new Blob([bytes], { type: 'image/png' });
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+          return true;
+        } catch (e) {
+          return String(e);
+        }
+      },
+    });
+    if (result && result.result === true) return true;
+    console.warn('[fullpage-shot] clipboard refused:', result && result.result);
+    return false;
+  } catch (e) {
+    console.warn('[fullpage-shot] clipboard injection failed:', e);
+    return false;
+  }
+}
+
 async function download(base64, filename) {
   const id = await chrome.downloads.download({
     url: `data:image/png;base64,${base64}`,
@@ -123,7 +154,11 @@ async function download(base64, filename) {
   return id;
 }
 
-async function run() {
+/**
+ * @param mode - 'copy' copies to the clipboard and falls back to a file when the
+ *   page cannot take one; 'save' always writes a PNG to Downloads.
+ */
+async function run(mode) {
   if (busy) return;
   busy = true;
   try {
@@ -135,6 +170,12 @@ async function run() {
     }
 
     const { base64, width, height } = await capture(tab);
+
+    if (mode === 'copy' && await copyToClipboard(tab.id, base64)) {
+      console.log(`[fullpage-shot] copied to clipboard — ${width}x${height}`);
+      return;
+    }
+
     const filename = `fullpage-${slug(hostOf(tab.url), 'page')}-${stamp()}.png`;
     await download(base64, filename);
     console.log(`[fullpage-shot] saved "${filename}" — ${width}x${height}`);
@@ -145,4 +186,8 @@ async function run() {
   }
 }
 
-chrome.action.onClicked.addListener(() => { run(); });
+chrome.action.onClicked.addListener(() => { run('copy'); });
+
+chrome.commands.onCommand.addListener((command) => {
+  if (command === 'save') run('save');
+});

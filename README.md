@@ -1,11 +1,17 @@
 # Full Page Shot
 
-A tiny Chrome extension that captures the **entire page as one PNG** — one click
-or `Alt+Shift+S`. No scrolling, no stitching.
+Capture the **entire page as one image** — one click. It lands on your clipboard
+so you can paste it straight into a chat, a doc, or an editor; a second shortcut
+saves it as a PNG instead.
 
-## How it works
+No scrolling. No stitching. No repeated headers.
 
-It drives the DevTools Protocol through `chrome.debugger`:
+## Why it looks right
+
+Most full-page extensions scroll the page and glue the viewport shots together.
+That duplicates every sticky header and misplaces lazy-loaded images. This one
+asks the browser to paint the whole document in a single pass, through the
+DevTools Protocol:
 
 ```js
 Page.getLayoutMetrics()                    // → cssContentSize = true document size
@@ -16,75 +22,75 @@ Page.captureScreenshot({
 })
 ```
 
-The browser paints the whole document **in a single pass**, exactly like
-DevTools' own *Capture full size screenshot*. Consequences:
+This is the same mechanism behind DevTools' own *Capture full size screenshot*.
+Because it is a single paint:
 
-- sticky/fixed headers appear **once**, not repeated down the image
+- sticky and fixed headers appear **once**
 - lazy-loaded images land at their real position
-- works on a **background tab** — the tab does not need focus
-- true pixel dimensions, no seams
+- it works on a **background tab** — the tab is never focused or scrolled
+- the pixel dimensions are exact, with no seams
 
-The debugger detaches in a `finally` block, so Chrome's "started debugging this
-browser" bar disappears immediately.
+Largest verified capture: **1351 × 5192 px**.
 
 ## Usage
 
 | action | result |
 |---|---|
-| Click the toolbar icon | captures the active tab |
-| `Alt+Shift+S` | same (rebindable at `chrome://extensions/shortcuts`) |
+| Click the toolbar icon | copies the full page to the clipboard |
+| `Alt+Shift+S` | same |
+| `Alt+Shift+D` | saves `fullpage-<host>-<timestamp>.png` to Downloads |
 
-The PNG goes to your Downloads folder. **Note:** it currently arrives as
-`download.png`, `download (1).png`, … rather than the intended
-`fullpage-<host>-<timestamp>.png` — see *Known issue* below.
+Shortcuts are rebindable at `chrome://extensions/shortcuts`.
 
-## Known issue — the filename hint is ignored
+The debugger attaches only for the duration of a single capture and detaches in a
+`finally` block, so Chrome's "started debugging this browser" bar disappears at
+once.
 
-`chrome.downloads.download({ url, filename, saveAs: false })` completes but
-Chrome names the file from the URL instead of honouring `filename`:
+## Install (unpacked)
 
-| URL passed | name Chrome used |
-|---|---|
-| `blob:chrome-extension://<id>/<uuid>` | `<uuid>.png` |
-| `data:image/png;base64,…` | `download.png` |
+1. Download and unzip this project (or clone it).
+2. Open `chrome://extensions`
+3. Turn on **Developer mode** (top-right)
+4. Click **Load unpacked** and select the folder
 
-Both were reproduced. The same pattern appeared for DevTools' own capture, which
-named its file from the page URL. So the suggested name is being dropped
-system-wide rather than by this extension — a download-manager extension
-installed alongside (IDM Integration Module) is the prime suspect, since those
-intercept and rename downloads by design.
-
-Untested fix: disable that extension and repeat the capture.
-
-## Install (unpacked — nothing goes to the Web Store)
-
-1. Open `chrome://extensions`
-2. Turn on **Developer mode** (top-right)
-3. Click **Load unpacked**
-4. Select this folder
+Requires Chrome 116 or newer.
 
 ## Permissions, and why each one
 
 | permission | reason |
 |---|---|
-| `debugger` | the only way to reach `Page.captureScreenshot` with `captureBeyondViewport` |
-| `downloads` | writes the PNG to your Downloads folder |
+| `debugger` | the only route to `Page.captureScreenshot` with `captureBeyondViewport`; attached per capture and detached immediately |
+| `clipboardWrite` | puts the captured image on the clipboard |
+| `scripting` + `activeTab` | runs the clipboard write in the page, which is the only context that can build a `ClipboardItem` |
+| `downloads` | writes the PNG to Downloads on the save shortcut |
 | `tabs` | reads the active tab's URL and title, and skips `chrome://` pages |
 
-No network requests. No analytics. No content scripts.
+No network requests. No analytics. No remote code. No content scripts running
+anywhere by default — the injection happens only on an explicit capture.
 
 ## Limits
 
-- `chrome://`, `chrome-extension://` and `about:` pages cannot be captured; the
-  browser blocks debugging there. The extension logs a warning and does nothing.
-- If DevTools is already open on the same tab, `chrome.debugger.attach` fails
-  ("Another debugger is already attached"). The code detaches and retries once.
-- Extremely tall pages are capped by Chrome's own texture limits, as with
-  DevTools. Largest verified capture: **1351 × 5192 px**.
+- `chrome://`, `chrome-extension://`, `about:` and similar pages cannot be
+  captured; the browser blocks debugging there. The extension logs a warning and
+  does nothing.
+- The clipboard route needs a focused page in a secure context (HTTPS or
+  localhost). If the page cannot take a clipboard write, the capture silently
+  falls back to saving a file, so the shot is never lost.
+- If DevTools is already open on the same tab, attaching fails with "Another
+  debugger is already attached". The extension detaches and retries once.
+- Extremely tall pages are capped by Chrome's own texture limits, exactly as
+  DevTools is.
 
-## Files
+## Building the icon set
 
-| file | role |
-|---|---|
-| `manifest.json` | MV3 manifest, permissions, `Alt+Shift+S` binding |
-| `background.js` | service worker: attach → measure → capture → detach → download |
+The icons are generated, not hand-drawn:
+
+```sh
+python tools/make-icons.py icons
+```
+
+Requires Pillow.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
