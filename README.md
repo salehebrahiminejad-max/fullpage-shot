@@ -18,7 +18,7 @@ Page.getLayoutMetrics()                    // → cssContentSize = true document
 Page.captureScreenshot({
   format: 'png',
   captureBeyondViewport: true,
-  clip: { x: 0, y: 0, width, height, scale: 1 }
+  fromSurface: true
 })
 ```
 
@@ -31,6 +31,18 @@ Because it is a single paint:
 - the pixel dimensions are exact, with no seams
 
 Largest verified capture: **1351 × 5192 px**.
+
+### Why there is no `clip`
+
+Passing an explicit `clip` alongside `captureBeyondViewport` looks like the
+tidier recipe, and it is what most examples show. It is also wrong for a scrolled
+page: the clip is interpreted against the document while the renderer still holds
+the live scroll offset, and Chrome then **repeats the first viewport** in the
+output — a 3080 px page came back as 1084 px of duplicated content.
+
+The fix is to scroll to the top, capture with no clip at all, and restore the
+reader's position afterwards. That is what `background.js` does, and the
+`Page.getLayoutMetrics` call is kept only to report the true dimensions.
 
 ## Usage
 

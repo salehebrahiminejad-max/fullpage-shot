@@ -73,6 +73,12 @@ function detach(tabId) {
   });
 }
 
+/** Run a page expression through CDP and return its value. */
+async function evaluate(tabId, expression) {
+  const res = await send(tabId, 'Runtime.evaluate', { expression, returnByValue: true });
+  return res && res.result ? res.result.value : undefined;
+}
+
 // ------------------------------------------------------------------- utilities
 
 function hostOf(url) {
@@ -102,15 +108,29 @@ const BLOCKED = /^(chrome|chrome-extension|edge|about|devtools|view-source):/i;
 async function capture(tab) {
   await attach(tab.id);
   try {
+    // A `clip` is interpreted against a scrolled page inconsistently, which
+    // makes Chrome repeat the first viewport in the output. So: scroll to the
+    // top, capture with no clip at all, and restore the reader's position.
+    // `captureBeyondViewport` then paints the whole document at its natural
+    // size, which is exactly what DevTools' own full-size capture does.
+    const scrollY = await evaluate(tab.id, 'window.scrollY');
+    await evaluate(tab.id, 'window.scrollTo(0, 0)');
+    await new Promise((r) => setTimeout(r, 200));
+
     const metrics = await send(tab.id, 'Page.getLayoutMetrics');
     const size = metrics.cssContentSize || metrics.contentSize || { width: 1280, height: 800 };
     const width = Math.max(1, Math.ceil(size.width));
     const height = Math.max(1, Math.ceil(size.height));
+
     const shot = await send(tab.id, 'Page.captureScreenshot', {
       format: 'png',
       captureBeyondViewport: true,
-      clip: { x: 0, y: 0, width, height, scale: 1 },
+      fromSurface: true,
     });
+
+    if (typeof scrollY === 'number' && scrollY > 0) {
+      await evaluate(tab.id, `window.scrollTo(0, ${Math.round(scrollY)})`);
+    }
     return { base64: shot.data, width, height };
   } finally {
     await detach(tab.id);
