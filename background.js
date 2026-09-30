@@ -1,22 +1,35 @@
 /**
  * Full Page Shot — background service worker.
  *
- * Capture uses the DevTools Protocol through `chrome.debugger`:
- * `Page.getLayoutMetrics` gives the true document size, then
- * `Page.captureScreenshot` with `captureBeyondViewport: true` paints the whole
- * document in ONE pass — no scrolling, no stitching, no repeated sticky headers,
- * and it works on a background tab without stealing focus. The debugger detaches
- * immediately, so Chrome's "started debugging this browser" bar goes away.
+ * Capture: `chrome.debugger` → `Page.captureScreenshot` with
+ * `captureBeyondViewport: true` paints the whole document in ONE pass. No
+ * scrolling, no stitching, no repeated sticky headers, works on a background
+ * tab. The debugger detaches in a finally block.
  *
- * Two destinations:
- *   - clipboard (default) — paste straight into a chat, doc, or editor
- *   - a PNG in Downloads
- * The clipboard write runs in the page, which is the only context that can build
- * a ClipboardItem. It needs the page to be focused and a secure context, so a
- * failure falls back to saving the file rather than doing nothing.
+ * Clipboard: the write must happen inside a page (a worker has no DOM), so it is
+ * injected with `chrome.scripting`. Two in-page strategies are tried because
+ * `navigator.clipboard.write()` for image data is fussy — it wants a focused
+ * document and can reject once the user-activation window has passed, which it
+ * always has by the time a capture finishes. The `execCommand('copy')` route
+ * over a selected <img> has no such requirement.
+ *
+ * Everything reports to the action badge, so a failure is visible without
+ * opening a console:
+ *   A1  clipboard API            A2  execCommand route
+ *   E1  injection failed         E2  both in-page routes failed
+ *   SV  fell back to a file      !!  capture itself failed
  */
 
 let busy = false;
+
+// ------------------------------------------------------------------- reporting
+
+async function badge(text, color) {
+  try {
+    await chrome.action.setBadgeText({ text });
+    if (color) await chrome.action.setBadgeBackgroundColor({ color });
+  } catch { /* badge is cosmetic */ }
+}
 
 // ---------------------------------------------------------------- CDP helpers
 
@@ -25,8 +38,6 @@ function attach(tabId) {
     chrome.debugger.attach({ tabId }, '1.3', () => {
       const err = chrome.runtime.lastError;
       if (!err) return resolve();
-      // A previous capture can leave a session behind if the worker was torn
-      // down mid-flight. Detach once and retry rather than failing outright.
       if (/already attached/i.test(err.message)) {
         chrome.debugger.detach({ tabId }, () => {
           void chrome.runtime.lastError;
@@ -65,11 +76,8 @@ function detach(tabId) {
 // ------------------------------------------------------------------- utilities
 
 function hostOf(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '') || 'page';
-  } catch {
-    return 'page';
-  }
+  try { return new URL(url).hostname.replace(/^www\./, '') || 'page'; }
+  catch { return 'page'; }
 }
 
 function slug(text, fallback) {
@@ -110,38 +118,70 @@ async function capture(tab) {
 }
 
 /**
- * Write the PNG to the system clipboard from inside the page.
+ * Copy the PNG to the system clipboard from inside the page.
  *
- * `func` is serialised and runs in the page, so it cannot close over anything —
- * every value it needs arrives through `args`. Returns false instead of throwing
- * when the context cannot accept a clipboard write (http page, unfocused
- * window, denied permission), which lets the caller fall back to a file.
+ * `func` is serialised and runs in the page, so it closes over nothing — all it
+ * needs arrives through `args`. It returns a short tag naming the route that
+ * worked, or why both failed.
  */
 async function copyToClipboard(tabId, base64) {
+  let results;
   try {
-    const [result] = await chrome.scripting.executeScript({
+    results = await chrome.scripting.executeScript({
       target: { tabId },
       args: [base64],
       func: async (b64) => {
+        const reasons = [];
+
+        // Route 1 — the async Clipboard API.
         try {
-          const binary = atob(b64);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-          const blob = new Blob([bytes], { type: 'image/png' });
-          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-          return true;
+          if (typeof ClipboardItem === 'undefined' || !navigator.clipboard || !navigator.clipboard.write) {
+            reasons.push('api unavailable');
+          } else {
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+            const blob = new Blob([bytes], { type: 'image/png' });
+            await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+            return 'A1';
+          }
         } catch (e) {
-          return String(e);
+          reasons.push('api: ' + (e && e.message ? e.message : e));
         }
+
+        // Route 2 — select an <img> and copy it. No focus or activation needed.
+        try {
+          const host = document.createElement('div');
+          host.setAttribute('contenteditable', 'true');
+          host.style.cssText = 'position:fixed;left:-99999px;top:0;opacity:0;';
+          host.innerHTML = '<img src="data:image/png;base64,' + b64 + '">';
+          document.body.appendChild(host);
+
+          const range = document.createRange();
+          range.selectNodeContents(host);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          const ok = document.execCommand('copy');
+          sel.removeAllRanges();
+          host.remove();
+
+          if (ok) return 'A2';
+          reasons.push('execCommand returned false');
+        } catch (e) {
+          reasons.push('exec: ' + (e && e.message ? e.message : e));
+        }
+
+        return 'E2 ' + reasons.join(' | ');
       },
     });
-    if (result && result.result === true) return true;
-    console.warn('[fullpage-shot] clipboard refused:', result && result.result);
-    return false;
   } catch (e) {
-    console.warn('[fullpage-shot] clipboard injection failed:', e);
-    return false;
+    console.warn('[fullpage-shot] injection failed:', e);
+    return 'E1 ' + (e && e.message ? e.message : e);
   }
+
+  const tag = results && results[0] ? results[0].result : 'E1 no result';
+  return typeof tag === 'string' ? tag : 'E1 unexpected';
 }
 
 async function download(base64, filename) {
@@ -155,8 +195,8 @@ async function download(base64, filename) {
 }
 
 /**
- * @param mode - 'copy' copies to the clipboard and falls back to a file when the
- *   page cannot take one; 'save' always writes a PNG to Downloads.
+ * @param mode - 'copy' copies to the clipboard and falls back to a file when no
+ *   in-page route works; 'save' always writes a PNG to Downloads.
  */
 async function run(mode) {
   if (busy) return;
@@ -165,22 +205,30 @@ async function run(mode) {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab || tab.id === undefined) return;
     if (BLOCKED.test(tab.url || '')) {
+      await badge('--', '#9aa0a6');
       console.warn('[fullpage-shot] cannot capture this page:', tab.url);
       return;
     }
 
     const { base64, width, height } = await capture(tab);
 
-    if (mode === 'copy' && await copyToClipboard(tab.id, base64)) {
-      console.log(`[fullpage-shot] copied to clipboard — ${width}x${height}`);
-      return;
+    if (mode === 'copy') {
+      const tag = await copyToClipboard(tab.id, base64);
+      console.log('[fullpage-shot] clipboard route:', tag, `${width}x${height}`);
+      if (tag === 'A1' || tag === 'A2') {
+        await badge(tag, tag === 'A1' ? '#1a7f37' : '#0b57d0');
+        return;
+      }
+      await badge(String(tag).slice(0, 2), '#c5221f');
     }
 
     const filename = `fullpage-${slug(hostOf(tab.url), 'page')}-${stamp()}.png`;
     await download(base64, filename);
+    if (mode === 'save') await badge('SV', '#0b57d0');
     console.log(`[fullpage-shot] saved "${filename}" — ${width}x${height}`);
   } catch (e) {
     console.error('[fullpage-shot] failed:', e);
+    await badge('!!', '#c5221f');
   } finally {
     busy = false;
   }
